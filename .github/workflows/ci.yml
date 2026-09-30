@@ -1,0 +1,56 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - run: npm test
+      - name: Start the synthetic deployment API
+        run: |
+          node testdata/runner.mjs --port 18777 > "$RUNNER_TEMP/hakopod-action-fixture.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/hakopod-action-fixture.pid"
+          for attempt in {1..30}; do
+            if curl --fail --silent --max-time 1 http://127.0.0.1:18777/healthz > /dev/null; then exit 0; fi
+            sleep 0.2
+          done
+          cat "$RUNNER_TEMP/hakopod-action-fixture.log"
+          exit 1
+      - name: Exercise the action with synthetic API data
+        id: smoke
+        uses: ./
+        with:
+          api-url: http://127.0.0.1:18777
+          api-token: synthetic-runner-token
+          application-id: synthetic-runner-application
+          services: '[{"name":"api","env":{"RELEASE":"synthetic-runner"}}]'
+          env: '{"SHARED":"synthetic-runner"}'
+          image: ghcr.io/example/api@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          timeout: '10'
+      - name: Check action outputs
+        env:
+          DEPLOYMENT_STATUS: ${{ steps.smoke.outputs.status }}
+          DEPLOYMENT_ID: ${{ steps.smoke.outputs.deployment-id }}
+          APPLICATION_ID: ${{ steps.smoke.outputs.application-id }}
+        run: |
+          test "$DEPLOYMENT_STATUS" = succeeded
+          test "$DEPLOYMENT_ID" = synthetic-runner-deployment
+          test "$APPLICATION_ID" = synthetic-runner-application
+      - name: Stop the synthetic API
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/hakopod-action-fixture.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/hakopod-action-fixture.pid")" 2>/dev/null || true
+          fi
